@@ -51,7 +51,7 @@ const TEST_MESSAGES = [
         resources: {}
       },
       serverInfo: {
-        name: '@jettoblack/image_mcp',
+        name: '@karlcc/image_mcp',
         version: '1.0.0'
       }
     }
@@ -70,68 +70,68 @@ const TEST_MESSAGES = [
     method: 'tools/list'
   },
   
-  // Call summarize_image tool with file path
+  // Call read_image_via_vision_backend tool with file path
   {
     jsonrpc: '2.0',
     id: 3,
     method: 'tools/call',
     params: {
-      name: 'summarize_image',
+      name: 'read_image_via_vision_backend',
       arguments: {
-        image_url: path.join(process.cwd(), 'test_image.webp')
+        image_path: path.join(process.cwd(), 'test_image.webp')
       }
     }
   },
-  
-  // Call summarize_image tool with HTTP URL
+
+  // Call read_image_via_vision_backend tool with HTTP URL
   {
     jsonrpc: '2.0',
     id: 4,
     method: 'tools/call',
     params: {
-      name: 'summarize_image',
+      name: 'read_image_via_vision_backend',
       arguments: {
-        image_url: 'https://example.com/image.jpg'
+        image_path: 'https://example.com/image.jpg'
       }
     }
   },
-  
-  // Call summarize_image tool with data URL
+
+  // Call read_image_via_vision_backend tool with data URL
   {
     jsonrpc: '2.0',
     id: 5,
     method: 'tools/call',
     params: {
-      name: 'summarize_image',
+      name: 'read_image_via_vision_backend',
       arguments: {
-        image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+        image_path: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
       }
     }
   },
-  
-  // Call summarize_image tool with raw base64
+
+  // Call read_image_via_vision_backend tool with raw base64
   {
     jsonrpc: '2.0',
     id: 6,
     method: 'tools/call',
     params: {
-      name: 'summarize_image',
+      name: 'read_image_via_vision_backend',
       arguments: {
-        image_url: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+        image_path: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
       }
     }
   },
-  
-  // Call summarize_image tool with custom prompt
+
+  // Call read_image_via_vision_backend tool with custom task
   {
     jsonrpc: '2.0',
     id: 7,
     method: 'tools/call',
     params: {
-      name: 'summarize_image',
+      name: 'read_image_via_vision_backend',
       arguments: {
-        image_url: path.join(process.cwd(), 'test_image.webp'),
-        custom_prompt: 'What colors are in this image?'
+        image_path: path.join(process.cwd(), 'test_image.webp'),
+        task: 'What colors are in this image?'
       }
     }
   }

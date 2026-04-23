@@ -1,0 +1,64 @@
+[
+  {
+    "id": "ocr_alpha",
+    "weight": 1,
+    "tool": "read_image_via_vision_backend",
+    "image_path": "bench/fixtures/ocr_alpha.svg",
+    "task": "Read the single large word in this image. Reply with exactly that one uppercase word and nothing else.",
+    "expected_regex": "\\bALPHA\\b"
+  },
+  {
+    "id": "ocr_digits",
+    "weight": 1,
+    "tool": "read_image_via_vision_backend",
+    "image_path": "bench/fixtures/ocr_digits.svg",
+    "task": "Read the number in this image. Reply with digits only and no extra text.",
+    "expected_regex": "\\b7319\\b"
+  },
+  {
+    "id": "dominant_color",
+    "weight": 1,
+    "tool": "read_image_via_vision_backend",
+    "image_path": "bench/fixtures/dominant_red.svg",
+    "task": "Which color occupies the larger area: RED or BLUE? Reply with exactly RED or BLUE.",
+    "expected_regex": "\\bRED\\b"
+  },
+  {
+    "id": "count_circles",
+    "weight": 1,
+    "tool": "read_image_via_vision_backend",
+    "image_path": "bench/fixtures/count_circles.svg",
+    "task": "How many circles are visible? Reply with one number only.",
+    "expected_regex": "\\b3\\b"
+  },
+  {
+    "id": "compare_same",
+    "weight": 1,
+    "tool": "compare_images_via_vision_backend",
+    "image_paths": [
+      "bench/fixtures/ocr_alpha.svg",
+      "bench/fixtures/ocr_alpha.svg"
+    ],
+    "task": "Do these two images show the SAME content or DIFFERENT content? Reply exactly SAME or DIFFERENT.",
+    "expected_regex": "\\bSAME\\b"
+  },
+  {
+    "id": "compare_different",
+    "weight": 1,
+    "tool": "compare_images_via_vision_backend",
+    "image_paths": [
+      "bench/fixtures/ocr_alpha.svg",
+      "bench/fixtures/ocr_beta.svg"
+    ],
+    "task": "Do these two images show the SAME content or DIFFERENT content? Reply exactly SAME or DIFFERENT.",
+    "expected_regex": "\\bDIFFERENT\\b"
+  },
+  {
+    "id": "repo_text",
+    "weight": 1,
+    "tool": "read_image_via_vision_backend",
+    "image_path": "test.svg",
+    "task": "What is the bold text at the bottom? Reply exactly in lowercase with underscore and no punctuation.",
+    "expected_regex": "\\bimage_mcp\\b"
+  }
+]

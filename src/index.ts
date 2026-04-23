@@ -6,16 +6,20 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  JSONRPCMessage
 } from '@modelcontextprotocol/sdk/types.js';
 import { OpenAIClient } from './openai-client.js';
 import { ImageProcessor } from './image-processor.js';
+import { assertVisionResponse, buildVisionGuardPrompt } from './vision-response.js';
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'node:http';
 
-// Configuration
 import { configManager } from './config.js';
+
+// Tool name constants
+const TOOL_GET_CONFIG_INFO = 'get_config_info';
+const TOOL_READ_IMAGE_VIA_VISION_BACKEND = 'read_image_via_vision_backend';
+const TOOL_COMPARE_IMAGES_VIA_VISION_BACKEND = 'compare_images_via_vision_backend';
 
 // Initialize components
 const openaiClient = new OpenAIClient(
@@ -25,77 +29,81 @@ const openaiClient = new OpenAIClient(
   configManager.getMaxRetries()
 );
 
-// Create MCP server
-const server = new Server(
-  {
-    name: '@jettoblack/image_mcp',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-      resources: {},
-      logging: {},
+// Factory: each MCP transport (stdio or one SSE connection) gets its own
+// Server instance. The SDK keeps only one active transport per Server, so
+// sharing a single Server across concurrent SSE clients would misroute
+// responses/logs between sessions.
+function createMcpServer(): Server {
+  const server = new Server(
+    {
+      name: '@karlcc/image_mcp',
+      version: '1.0.0',
     },
-  }
-);
-
-// Server capabilities
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: 'summarize_image',
-        description: 'Analyze and describe an image in detail',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            image_url: {
-              type: 'string',
-              description: 'URL to the image file to analyze (supports absolute file paths, file:// URLs, http/https protocols, and data URL with base64 encoded image file)'
-            },
-            custom_prompt: {
-              type: 'string',
-              description: 'Custom prompt to use instead of the default image description prompt. Use this to request specific details about the image.',
-              default: 'Describe this image in detail, including all text.'
-            }
-          },
-          required: ['image_url'],
-          additionalProperties: false
-        }
+    {
+      capabilities: {
+        tools: {},
+        resources: {},
+        logging: {},
       },
-      {
-        name: 'compare_images',
-        description: 'Compares 2 or more images and describes the differences',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            image_urls: {
-              type: 'array',
-              items: {
-                type: 'string',
-                description: 'URL to the image file to analyze (supports absolute file paths, file:// URLs, http/https protocols, and data URL with base64 encoded image file)'
-              },
-              minItems: 2,
-              description: 'Array of image URLs to compare (minimum 2 images required)'
-            },
-            custom_prompt: {
-              type: 'string',
-              description: 'Custom prompt to use instead of the default image comparison prompt',
-              default: 'Compare these images in detail, including all text, and describe the similarities and differences.'
-            }
-          },
-          required: ['image_urls'],
-          additionalProperties: false
-        }
-      }
-    ]
-  };
-});
+      instructions:
+        'Vision-capable backend for image inspection (OCR, screenshots, diagrams/charts, UI diffs). Use for any image analysis the host can\'t do natively. Accepts local absolute paths, http(s) URLs, and data URLs.',
+    }
+  );
+  registerHandlers(server);
+  return server;
+}
 
-// Shared function to handle summarize_image tool
+// Extract text from OpenAI chat response, handling thinking models that put
+// the answer in reasoning_content or reasoning instead of content.
+function extractMessageText(message: any): string {
+  return message?.content || message?.reasoning_content || message?.reasoning || '';
+}
+
+async function executeChatRequest(chatRequest: any): Promise<string> {
+  if (chatRequest.stream) {
+    let accumulatedContent = '';
+    let accumulatedReasoning = '';
+    const result = await openaiClient.chatCompletion(chatRequest, (chunk) => {
+      const delta = chunk.choices?.[0]?.delta as any;
+      if (delta?.content) {
+        accumulatedContent += delta.content;
+      }
+      if (delta?.reasoning_content) {
+        accumulatedReasoning += delta.reasoning_content;
+      }
+      if (delta?.reasoning) {
+        accumulatedReasoning += delta.reasoning;
+      }
+    });
+    const message = result.choices?.[0]?.message as any;
+    return accumulatedContent || extractMessageText(message) || accumulatedReasoning || 'No response received';
+  }
+
+  const result = await openaiClient.chatCompletion(chatRequest);
+  const message = result.choices?.[0]?.message as any;
+  return extractMessageText(message) || 'No response received';
+}
+
+function textContent(text: string) {
+  return { type: 'text' as const, text };
+}
+
+function toolErrorResult(error: unknown) {
+  const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+  return {
+    content: [textContent(`Error: ${errorMessage}`)],
+    isError: true
+  };
+}
+
+function requireObjectArgs(args: unknown): Record<string, any> {
+  if (!args || typeof args !== 'object') {
+    throw new Error('Invalid arguments: expected an object');
+  }
+  return args as Record<string, any>;
+}
+
 async function handleSummarizeImage(image_url: string, custom_prompt?: string, enableStreaming: boolean = false) {
-  // Validate required parameters
   if (!image_url) {
     throw new Error('image_url must be provided');
   }
@@ -104,79 +112,42 @@ async function handleSummarizeImage(image_url: string, custom_prompt?: string, e
     throw new Error('image_url must be a string');
   }
 
-  // Process the image URL to handle different input formats (file paths, HTTP URLs, data URLs, etc.)
+  const processStart = Date.now();
   const processedImage = await ImageProcessor.processImage(image_url);
+  const processTimeMs = Date.now() - processStart;
 
-  // Prepare the content for the OpenAI API
-  const prompt = custom_prompt || 'Describe this image in detail, including all text.';
+  console.error(`[summarize_image] Processed input in ${processTimeMs}ms — type: ${processedImage.mimeType}, size: ${processedImage.size} bytes`);
 
-  // Convert MCP content to OpenAI format
+  const prompt = buildVisionGuardPrompt(custom_prompt || 'Describe this image in detail, including all text.');
+  const model = configManager.getModel();
+  if (!model) {
+    throw new Error('No model configured. Set OPENAI_MODEL or run with --model.');
+  }
+
   const chatRequest = {
-    model: configManager.getModel() || 'gemma3:4b-it-qat-cpu',
+    model,
     messages: [
       {
         role: 'user' as const,
         content: [
-          {
-            type: 'text' as const,
-            text: prompt
-          },
-          {
-            type: 'image_url' as const,
-            image_url: {
-              url: processedImage.url
-            }
-          }
+          { type: 'text' as const, text: prompt },
+          { type: 'image_url' as const, image_url: { url: processedImage.url } }
         ]
       }
     ],
     stream: enableStreaming
   };
 
-  if (chatRequest.stream) {
-    // For streaming responses, we need to accumulate the content
-    let accumulatedContent = '';
-
-    const result = await openaiClient.chatCompletion(chatRequest, (chunk) => {
-      const chunkContent = chunk.choices?.[0]?.delta?.content || '';
-      if (chunkContent) {
-        accumulatedContent += chunkContent;
-      }
-    });
-
-    // Use the accumulated content or the final response
-    const finalContent = accumulatedContent || (result.choices?.[0]?.message?.content || 'No response received');
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: finalContent
-        }
-      ]
-    };
-
-  } else {
-    // Call the OpenAI API without streaming
-    const result = await openaiClient.chatCompletion(chatRequest);
-
-    // Extract the content from the response
-    const content = result.choices?.[0]?.message?.content || 'No response received';
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: content
-        }
-      ]
-    };
-  }
+  const text = await executeChatRequest(chatRequest);
+  const checkedText = assertVisionResponse(text, {
+    loadedSummary: `Image input (${processedImage.mimeType}, ${processedImage.size} bytes)`,
+    model,
+    sourceHints: [image_url],
+  });
+  return { content: [textContent(checkedText)] };
 }
 
-// Shared function to handle compare_images tool
 async function handleCompareImages(image_urls: string[], custom_prompt?: string, enableStreaming: boolean = false) {
-  // Validate required parameters
   if (!image_urls || !Array.isArray(image_urls)) {
     throw new Error('image_urls must be provided as an array');
   }
@@ -185,7 +156,7 @@ async function handleCompareImages(image_urls: string[], custom_prompt?: string,
     throw new Error('At least 2 images are required for comparison');
   }
 
-  // Process all image URLs
+  const processStart = Date.now();
   const processedImages = await Promise.all(
     image_urls.map(async (image_url, index) => {
       if (typeof image_url !== 'string') {
@@ -194,177 +165,199 @@ async function handleCompareImages(image_urls: string[], custom_prompt?: string,
       return await ImageProcessor.processImage(image_url);
     })
   );
+  const processTimeMs = Date.now() - processStart;
 
-  // Prepare the content for the OpenAI API
-  const prompt = custom_prompt || 'Compare these images in detail, including all text, and describe the similarities and differences.';
+  console.error(`[compare_images] Processed ${processedImages.length} images in ${processTimeMs}ms`);
 
-  // Build content array with prompt and all images
+  const prompt = buildVisionGuardPrompt(
+    custom_prompt || 'Compare these images in detail, including all text, and describe the similarities and differences.'
+  );
+  const model = configManager.getModel();
+  if (!model) {
+    throw new Error('No model configured. Set OPENAI_MODEL or run with --model.');
+  }
+
   const content: Array<{ type: 'text' | 'image_url'; text?: string; image_url?: { url: string } }> = [
-    {
-      type: 'text' as const,
-      text: prompt
-    }
+    { type: 'text' as const, text: prompt }
   ];
 
-  // Add all processed images
   processedImages.forEach(processedImage => {
     content.push({
       type: 'image_url' as const,
-      image_url: {
-        url: processedImage.url
-      }
+      image_url: { url: processedImage.url }
     });
   });
 
-  // Convert MCP content to OpenAI format
   const chatRequest = {
-    model: configManager.getModel() || 'gemma3:4b-it-qat-cpu',
+    model,
     messages: [
-      {
-        role: 'user' as const,
-        content
-      }
+      { role: 'user' as const, content }
     ],
     stream: enableStreaming
   };
 
-  if (chatRequest.stream) {
-    // For streaming responses, we need to accumulate the content
-    let accumulatedContent = '';
+  const text = await executeChatRequest(chatRequest);
+  const checkedText = assertVisionResponse(text, {
+    loadedSummary: `${processedImages.length} image inputs (first image ${processedImages[0].mimeType}, ${processedImages[0].size} bytes)`,
+    model,
+    sourceHints: image_urls,
+  });
+  return { content: [textContent(checkedText)] };
+}
 
-    const result = await openaiClient.chatCompletion(chatRequest, (chunk) => {
-      const chunkContent = chunk.choices?.[0]?.delta?.content || '';
-      if (chunkContent) {
-        accumulatedContent += chunkContent;
+function handleGetConfigInfo() {
+  const configInfo = configManager.getConfigInfo();
+  return { content: [textContent(JSON.stringify(configInfo, null, 2))] };
+}
+
+// Unified tool dispatch — returns handler result or throws
+async function dispatchToolCall(toolName: string, args: Record<string, any>, enableStreaming: boolean) {
+  switch (toolName) {
+    case TOOL_GET_CONFIG_INFO:
+      return handleGetConfigInfo();
+    case TOOL_READ_IMAGE_VIA_VISION_BACKEND: {
+      const validatedArgs = requireObjectArgs(args);
+      const imageUrl = validatedArgs.image_path as string;
+      if (!imageUrl || typeof imageUrl !== 'string') {
+        throw new Error('image_path must be provided as a string');
       }
-    });
-
-    // Use the accumulated content or the final response
-    const finalContent = accumulatedContent || (result.choices?.[0]?.message?.content || 'No response received');
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: finalContent
-        }
-      ]
-    };
-
-  } else {
-    // Call the OpenAI API without streaming
-    const result = await openaiClient.chatCompletion(chatRequest);
-
-    // Extract the content from the response
-    const content = result.choices?.[0]?.message?.content || 'No response received';
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: content
-        }
-      ]
-    };
+      return await handleSummarizeImage(imageUrl, validatedArgs.task as string | undefined, enableStreaming);
+    }
+    case TOOL_COMPARE_IMAGES_VIA_VISION_BACKEND: {
+      const validatedArgs = requireObjectArgs(args);
+      const imageUrls = validatedArgs.image_paths as string[];
+      if (!Array.isArray(imageUrls) || imageUrls.length < 2) {
+        throw new Error('image_paths must be an array of at least 2 image paths/URLs');
+      }
+      return await handleCompareImages(imageUrls, validatedArgs.task as string | undefined, enableStreaming);
+    }
+    default:
+      throw new Error(`Unknown tool: ${toolName}`);
   }
 }
 
-// Tool handler for summarize_image
+function registerHandlers(server: Server): void {
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: TOOL_READ_IMAGE_VIA_VISION_BACKEND,
+        description: 'Read/OCR/analyze one image (local path, URL, or data URL) via a vision backend.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            image_path: {
+              type: 'string',
+              description: 'Image to analyze — absolute local path, http(s) URL, or data URL (e.g. /Users/me/screenshot.png, https://example.com/img.png, data:image/png;base64,...)'
+            },
+            task: {
+              type: 'string',
+              description: 'What to do with the image (e.g. "Read all text", "Describe the UI layout", "Extract data from chart"). Defaults to a general description.',
+              default: 'Describe this image in detail, including all text.'
+            }
+          },
+          required: ['image_path'],
+          additionalProperties: false
+        },
+        annotations: { readOnlyHint: true, idempotentHint: true }
+      },
+      {
+        name: TOOL_COMPARE_IMAGES_VIA_VISION_BACKEND,
+        description: 'Compare 2+ images (local paths, URLs, or data URLs) via a vision backend.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            image_paths: {
+              type: 'array',
+              items: {
+                type: 'string',
+                description: 'Image to compare — absolute local path, http(s) URL, or data URL'
+              },
+              minItems: 2,
+              description: 'Array of images to compare (minimum 2 required)'
+            },
+            task: {
+              type: 'string',
+              description: 'What to compare (e.g. "Describe UI differences", "Which chart shows higher values?"). Defaults to a general comparison.',
+              default: 'Compare these images in detail, including all text, and describe the similarities and differences.'
+            }
+          },
+          required: ['image_paths'],
+          additionalProperties: false
+        },
+        annotations: { readOnlyHint: true, idempotentHint: true }
+      },
+      {
+        name: TOOL_GET_CONFIG_INFO,
+        description: 'Show current server configuration with API key redacted',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false
+        },
+        annotations: { readOnlyHint: true }
+      }
+    ]
+  };
+});
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  // Log the incoming request for debugging purposes
   server.sendLoggingMessage({
     level: "info",
     data: JSON.stringify(request.params),
   });
 
-  if (name === 'summarize_image') {
-    try {
-      // Validate arguments
-      if (!args || typeof args !== 'object') {
-        throw new Error('Invalid arguments: expected an object');
-      }
+  try {
+    const enableStreaming = configManager.isHttpEnabled() && configManager.isStreamingEnabled();
+    return await dispatchToolCall(name, args ?? {}, enableStreaming);
+  } catch (error) {
+    server.sendLoggingMessage({
+      level: "error",
+      data: JSON.stringify(error),
+    });
 
-      const { image_url, custom_prompt } = args;
-
-      // Determine if we're using HTTP transport or stdio
-      const useHttp = process.env.MCP_USE_HTTP === 'true' || process.argv.includes('--http');
-
-      // Only enable streaming when in HTTP/SSE mode, disable for stdio mode
-      const enableStreaming = useHttp && configManager.isStreamingEnabled();
-
-      return await handleSummarizeImage(image_url as string, custom_prompt as string | undefined, enableStreaming);
-
-    } catch (error) {
-      // Log the error for debugging purposes
-      server.sendLoggingMessage({
-        level: "error",
-        data: JSON.stringify(error),
-      });
-
-      // Return a user-friendly error message
-      const errorMessage = error instanceof Error ? error.message : 'Failed to process image';
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
-    }
-  } else if (name === 'compare_images') {
-    try {
-      // Validate arguments
-      if (!args || typeof args !== 'object') {
-        throw new Error('Invalid arguments: expected an object');
-      }
-
-      const { image_urls, custom_prompt } = args;
-
-      // Determine if we're using HTTP transport or stdio
-      const useHttp = process.env.MCP_USE_HTTP === 'true' || process.argv.includes('--http');
-
-      // Only enable streaming when in HTTP/SSE mode, disable for stdio mode
-      const enableStreaming = useHttp && configManager.isStreamingEnabled();
-
-      return await handleCompareImages(image_urls as string[], custom_prompt as string | undefined, enableStreaming);
-
-    } catch (error) {
-      // Log the error for debugging purposes
-      server.sendLoggingMessage({
-        level: "error",
-        data: JSON.stringify(error),
-      });
-
-      // Return a user-friendly error message
-      const errorMessage = error instanceof Error ? error.message : 'Failed to compare images';
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
-    }
+    return toolErrorResult(error);
   }
-
-  throw new Error(`Unknown tool: ${name}`);
 });
+}
 
-// Start the server
 async function main() {
   try {
-    // Check if we should use HTTP transport or stdio
-    const useHttp = process.env.MCP_USE_HTTP === 'true' || process.argv.includes('--http');
+    // Handle --verify flag: probe vision capability, then save if --save-config was deferred
+    if (configManager.needsVerify) {
+      const ok = await configManager.runVerify();
+      if (ok && configManager.needsSave) {
+        configManager.saveConfig();
+      }
+      process.exit(ok ? 0 : 1);
+    }
 
-    if (useHttp) {
+    // Optional startup probe: warn (don't exit) if model can't see images
+    const probeOnStart = process.env.IMAGE_MCP_PROBE_ON_START === 'true';
+    if (probeOnStart) {
+      const model = configManager.getModel();
+      if (model) {
+        try {
+          const { probeVisionCapability } = await import('./vision-probe.js');
+          const result = await probeVisionCapability(openaiClient, model);
+          if (!result.ok) {
+            console.error(
+              `[VISION PROBE WARNING] Model "${model}" failed vision probe: ${result.reason}` +
+              (result.rawResponse ? ` — ${result.rawResponse.slice(0, 150)}` : '') +
+              `. Server is running but image tools will likely fail.`
+            );
+          } else {
+            console.error(`[VISION PROBE OK] Model "${model}" verified in ${result.latencyMs}ms`);
+          }
+        } catch (e: any) {
+          console.error(`[VISION PROBE ERROR] Could not verify model "${model}": ${e.message}`);
+        }
+      }
+    }
+
+    if (configManager.isHttpEnabled()) {
       await startHttpServer();
     } else {
       await startStdioServer();
@@ -376,213 +369,94 @@ async function main() {
 }
 
 async function startStdioServer() {
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.log('Image Summarization MCP server running on stdio');
 }
 
-// Global map to store active SSE transports
 const sseTransports = new Map<string, SSEServerTransport>();
+const sseServers = new Map<string, Server>();
 
 async function startHttpServer() {
   const app = express();
-  const server = createServer(app);
-  
-  // Enable CORS for all routes
+  const httpServer = createServer(app);
+
   app.use(cors());
   app.use(express.json());
-  
-  // SSE endpoint
+
+  // SSE endpoint: client connects here to receive server-initiated messages.
+  // server.connect(transport) wires the SDK request router so that
+  // initialize, tools/list, tools/call, and logging all work over HTTP.
   app.get('/sse', async (req, res) => {
     try {
-      const transport = new SSEServerTransport('/sse', res);
-      await transport.start();
-      
-      // Store the transport
+      const transport = new SSEServerTransport('/messages', res);
+      // Each SSE connection gets a fresh Server so overlapping clients can't
+      // share the single _transport slot inside the SDK's Protocol base.
+      const server = createMcpServer();
       sseTransports.set(transport.sessionId, transport);
-      
-      // Set up message handler - handle messages through the standard MCP server
-      transport.onmessage = async (message) => {
-        try {
-          // For SSE, we'll handle basic tool calls directly
-          const msg = message as any;
-          
-          if (msg.method === 'tools/call') {
-            const toolName = msg.params?.name;
-            const args = msg.params?.arguments || {};
-            
-            if (toolName === 'summarize_image') {
-              // Use the shared handler function
-              const enableStreaming = configManager.isStreamingEnabled();
-              const response = await handleSummarizeImage(args.image_url as string, args.custom_prompt as string | undefined, enableStreaming);
+      sseServers.set(transport.sessionId, server);
 
-              // Send the response back through SSE
-              await transport.send({
-                jsonrpc: '2.0',
-                id: msg.id,
-                result: response
-              });
-
-            } else if (toolName === 'compare_images') {
-              // Use the shared handler function
-              const enableStreaming = configManager.isStreamingEnabled();
-              const response = await handleCompareImages(args.image_urls as string[], args.custom_prompt as string | undefined, enableStreaming);
-
-              // Send the response back through SSE
-              await transport.send({
-                jsonrpc: '2.0',
-                id: msg.id,
-                result: response
-              });
-
-            } else {
-              throw new Error(`Unknown tool: ${toolName}`);
-            }
-          } else {
-            throw new Error(`Method not supported: ${msg.method}`);
-          }
-        } catch (error) {
-          console.error('Error handling SSE message:', error);
-          
-          try {
-            await transport.send({
-              jsonrpc: '2.0',
-              id: (message as any).id,
-              error: {
-                code: -32603,
-                message: 'Internal error while processing request'
-              }
-            });
-          } catch (sendError) {
-            console.error('Error sending error response:', sendError);
-          }
+      transport.onclose = () => {
+        sseTransports.delete(transport.sessionId);
+        const s = sseServers.get(transport.sessionId);
+        sseServers.delete(transport.sessionId);
+        if (s) {
+          s.close().catch((err) => console.error('Error closing SSE server:', err));
         }
       };
-      
-      transport.onerror = (error) => {
-        console.error('SSE transport error:', error);
-      };
-      
-      transport.onclose = () => {
-        console.log('SSE connection closed');
-        sseTransports.delete(transport.sessionId);
-      };
-      
+
+      // Connect the MCP server to this transport — this replaces the old
+      // hand-rolled onmessage dispatch with full SDK routing.
+      await server.connect(transport);
+
+      console.error(`[SSE] Client connected (session ${transport.sessionId})`);
     } catch (error) {
       console.error('Error setting up SSE transport:', error);
-      res.status(500).send('Internal server error');
+      if (!res.headersSent) {
+        res.status(500).send('Internal server error');
+      }
     }
   });
-  
-  // POST endpoint for MCP messages over HTTP
-  app.post('/sse', async (req, res) => {
+
+  // Message endpoint: clients POST here to send JSON-RPC messages.
+  // The sessionId query parameter routes to the correct transport.
+  app.post('/messages', async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = sessionId ? sseTransports.get(sessionId) : undefined;
+
+    if (!transport) {
+      return res.status(400).json({ error: 'No active SSE session for this sessionId' });
+    }
+
     try {
-      const message: JSONRPCMessage = req.body;
-      
-      if (!message || message.jsonrpc !== '2.0') {
-        return res.status(400).json({ error: 'Invalid JSON-RPC message' });
-      }
-      
-      const msg = message as any;
-      
-      if (msg.method === 'tools/call') {
-        const toolName = msg.params?.name;
-        const args = msg.params?.arguments || {};
-        
-        if (toolName === 'summarize_image') {
-          try {
-            // Use the shared handler function
-            const enableStreaming = configManager.isStreamingEnabled();
-            const response = await handleSummarizeImage(args.image_url as string, args.custom_prompt as string | undefined, enableStreaming);
-
-            return res.json({
-              jsonrpc: '2.0',
-              id: msg.id,
-              result: response
-            });
-
-          } catch (error) {
-            console.error('Error processing image:', error);
-            return res.json({
-              jsonrpc: '2.0',
-              id: msg.id,
-              error: {
-                code: -32603,
-                message: `Internal error: ${error instanceof Error ? error.message : 'Unknown error'}`
-              }
-            });
-          }
-        } else if (toolName === 'compare_images') {
-          try {
-            // Use the shared handler function
-            const enableStreaming = configManager.isStreamingEnabled();
-            const response = await handleCompareImages(args.image_urls as string[], args.custom_prompt as string | undefined, enableStreaming);
-
-            return res.json({
-              jsonrpc: '2.0',
-              id: msg.id,
-              result: response
-            });
-
-          } catch (error) {
-            console.error('Error comparing images:', error);
-            return res.json({
-              jsonrpc: '2.0',
-              id: msg.id,
-              error: {
-                code: -32603,
-                message: `Internal error: ${error instanceof Error ? error.message : 'Unknown error'}`
-              }
-            });
-          }
-        } else {
-          return res.json({
-            jsonrpc: '2.0',
-            id: msg.id,
-            error: {
-              code: -32601,
-              message: `Unknown tool: ${toolName}`
-            }
-          });
-        }
-      } else {
-        return res.json({
-          jsonrpc: '2.0',
-          id: msg.id,
-          error: {
-            code: -32601,
-            message: `Method not supported: ${msg.method}`
-          }
-        });
-      }
+      await transport.handlePostMessage(req, res, req.body);
     } catch (error) {
       console.error('Error handling POST message:', error);
-      res.status(500).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal server error'
-        }
-      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal server error' });
+      }
     }
   });
-  
-  // Health check endpoint
+
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', transports: sseTransports.size });
+    res.json({
+      status: 'ok',
+      transports: sseTransports.size,
+      mode: 'http',
+      mcpPort: configManager.getMcpPort()
+    });
   });
-  
-  const PORT = process.env.MCP_PORT || process.argv["mcp_port"] || 8080;
-  
-  server.listen(PORT, () => {
+
+  const PORT = configManager.getMcpPort();
+
+  httpServer.listen(PORT, () => {
     console.log(`Image Summarization MCP server running on HTTP at http://localhost:${PORT}`);
-    console.log(`SSE endpoint available at http://localhost:${PORT}/sse`);
+    console.log(`SSE endpoint: http://localhost:${PORT}/sse  |  Messages: http://localhost:${PORT}/messages`);
     console.log(`Health check available at http://localhost:${PORT}/health`);
   });
-  
-  // Clean up on exit
+
   process.on('SIGTERM', () => {
-    // Close all SSE transports
     for (const transport of sseTransports.values()) {
       try {
         transport.close();
@@ -591,8 +465,12 @@ async function startHttpServer() {
       }
     }
     sseTransports.clear();
-    
-    server.close(() => {
+    for (const s of sseServers.values()) {
+      s.close().catch((err) => console.error('Error closing SSE server:', err));
+    }
+    sseServers.clear();
+
+    httpServer.close(() => {
       console.log('HTTP server closed');
     });
   });

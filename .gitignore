@@ -2,3 +2,4 @@ build/
 debug/
 node_modules/
 image-summarization-mcp*.tgz
+.mcp.json

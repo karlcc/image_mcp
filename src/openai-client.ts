@@ -93,11 +93,22 @@ export class OpenAIClient {
 
         config.retryCount += 1;
 
-        // Exponential backoff: base delay of 1 second, multiplied by 2^(retryCount-1)
-        // This gives delays of 1s, 2s, 4s, 8s, etc., capped at 30 seconds
-        const delay = Math.min(1000 * Math.pow(2, config.retryCount - 1), 30000);
+        // Exponential backoff with longer base for 429 rate limits
+        const is429 = error.response?.status === 429;
+        const baseDelay = is429 ? 5000 : 1000;
+        let delay = Math.min(baseDelay * Math.pow(2, config.retryCount - 1), 60000);
 
-        console.warn(`Retrying request (attempt ${config.retryCount}/${this.maxRetries}) after ${delay}ms delay`);
+        // Respect Retry-After header if present
+        const retryAfter = error.response?.headers?.['retry-after'];
+        if (retryAfter) {
+          const retryAfterMs = Number(retryAfter) > 0
+            ? Number(retryAfter) * 1000
+            : Math.max(0, new Date(retryAfter).getTime() - Date.now());
+          if (retryAfterMs > 0) delay = retryAfterMs;
+        }
+
+        const reason = is429 ? 'rate limit' : 'server error';
+        console.warn(`Retrying ${reason} (attempt ${config.retryCount}/${this.maxRetries}) after ${delay}ms delay`);
         await new Promise(resolve => setTimeout(resolve, delay));
 
         return this.client(config);
@@ -173,28 +184,7 @@ export class OpenAIClient {
     }
 
     try {
-      // Create a modified request with URL-encoded image URLs
-      const modifiedRequest = {
-        ...request,
-        messages: request.messages.map(msg => ({
-          ...msg,
-          content: msg.content.map(c => {
-            if (c.type === 'text') return c;
-            if (c.type === 'image_url' && c.image_url?.url) {
-              return {
-                ...c,
-                image_url: {
-                  ...c.image_url,
-                  url: c.image_url.url
-                }
-              };
-            }
-            return c;
-          })
-        }))
-      };
-
-      const response = await this.client.post('/chat/completions', modifiedRequest, {
+      const response = await this.client.post('/chat/completions', request, {
         responseType: request.stream ? 'stream' : 'json',
         headers: request.stream ? { 'Accept': 'text/event-stream' } : {},
       });

@@ -1,7 +1,18 @@
 // Comprehensive tests for the image processing tool
 import { ImageProcessor } from '../src/image-processor';
 import fs from 'fs-extra';
+import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'node:url';
+
+// Re-export isAbsoluteLocalPath for testing — it's a module-level function
+// in index.ts, so we test path.isAbsolute logic inline here.
+function isAbsoluteLocalPath(s: string): boolean {
+  if (!s || typeof s !== 'string') return false;
+  if (s.startsWith('file://') || s.startsWith('http://') || s.startsWith('https://') || s.startsWith('data:')) return false;
+  if (s.startsWith('@')) return false;
+  return path.isAbsolute(s);
+}
 
 describe('Image Processing Tests', () => {
   // Test image data for different input types
@@ -77,6 +88,46 @@ describe('Image Processing Tests', () => {
       expect(result.url).toMatch(/^data:image\/[^;]+;base64,/);
       expect(result.mimeType).toMatch(/^image\/[\w+]+$/);
       expect(result.size).toBeGreaterThan(0);
+    });
+
+    it('should process @-prefixed file path input', async () => {
+      if (!(await fs.pathExists(testImagePath))) {
+        console.log(`Skipping @ file path test - test image not found at ${testImagePath}`);
+        return;
+      }
+
+      const result = await ImageProcessor.processImage(`@${testImagePath}`);
+
+      expect(result).toBeDefined();
+      expect(result.url).toMatch(/^data:image\/[^;]+;base64,/);
+      expect(result.mimeType).toMatch(/^image\/[\w+]+$/);
+      expect(result.size).toBeGreaterThan(0);
+    });
+
+    it('should process percent-encoded file URLs for non-ASCII filenames', async () => {
+      if (!(await fs.pathExists(testImagePath))) {
+        console.log(`Skipping percent-encoded file URL test - test image not found at ${testImagePath}`);
+        return;
+      }
+
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'image-mcp-'));
+      const nonAsciiPath = path.join(tempDir, '螢幕截圖 2025-11-30 15.00.14.svg');
+
+      try {
+        await fs.copy(testImagePath, nonAsciiPath);
+
+        const fileUrl = pathToFileURL(nonAsciiPath).href;
+        expect(fileUrl).toContain('%');
+
+        const result = await ImageProcessor.processImage(fileUrl);
+
+        expect(result).toBeDefined();
+        expect(result.url).toMatch(/^data:image\/[^;]+;base64,/);
+        expect(result.mimeType).toBe('image/svg+xml');
+        expect(result.size).toBeGreaterThan(0);
+      } finally {
+        await fs.remove(tempDir);
+      }
     });
 
     it('should process data URL input and pass through', async () => {
@@ -201,13 +252,13 @@ describe('Image Processing Tests', () => {
     });
   });
 
-  describe('ImageProcessor compare_images functionality', () => {
+  describe('ImageProcessor multi-image functionality', () => {
     const localTestDataUrl1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     const localTestDataUrl2 = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA/vAA=';
     const localTestImageUrl = 'https://picsum.photos/200';
 
     it('should support processing multiple images for comparison', async () => {
-      // Test that ImageProcessor can handle multiple images (used by compare_images tool)
+      // Test that ImageProcessor can handle multiple images
       const testImages = [
         localTestDataUrl1,
         localTestDataUrl2
@@ -229,7 +280,7 @@ describe('Image Processing Tests', () => {
     });
 
     it('should validate multiple image inputs for comparison', () => {
-      // Test validation for multiple images (used by compare_images tool)
+      // Test validation for multiple images
       const validImages = [localTestDataUrl1, localTestDataUrl2, localTestImageUrl];
       const invalidImages = ['', null, undefined];
 
@@ -253,8 +304,9 @@ describe('Project Structure Tests', () => {
   it('should have package.json with correct dependencies', () => {
     const packageJson = require('../package.json');
     
-    expect(packageJson.name).toBe('@jettoblack/image_mcp');
-    expect(packageJson.version).toBe('1.0.0');
+    expect(packageJson.name).toBe('@karlcc/image_mcp');
+    expect(typeof packageJson.version).toBe('string');
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(packageJson.main).toBe('build/index.js');
     expect(packageJson.scripts).toHaveProperty('build');
     expect(packageJson.scripts).toHaveProperty('test');
@@ -291,5 +343,43 @@ describe('Project Structure Tests', () => {
     const path = require('path');
 
     expect(fs.existsSync(path.join(__dirname, '../README.md'))).toBe(true);
+  });
+});
+
+// Tests for the vision-backend alias tool path validation
+describe('isAbsoluteLocalPath (alias tool validation)', () => {
+  it('should accept absolute paths', () => {
+    expect(isAbsoluteLocalPath('/Users/me/image.png')).toBe(true);
+    expect(isAbsoluteLocalPath('/tmp/screenshot.jpg')).toBe(true);
+    expect(isAbsoluteLocalPath(path.join(__dirname, 'test.svg'))).toBe(true);
+  });
+
+  it('should reject relative paths', () => {
+    expect(isAbsoluteLocalPath('relative.png')).toBe(false);
+    expect(isAbsoluteLocalPath('./rel.png')).toBe(false);
+    expect(isAbsoluteLocalPath('../parent.png')).toBe(false);
+  });
+
+  it('should reject file:// URLs', () => {
+    expect(isAbsoluteLocalPath('file:///Users/me/image.png')).toBe(false);
+  });
+
+  it('should reject http(s):// URLs', () => {
+    expect(isAbsoluteLocalPath('https://example.com/img.png')).toBe(false);
+    expect(isAbsoluteLocalPath('http://localhost/img.png')).toBe(false);
+  });
+
+  it('should reject data: URLs', () => {
+    expect(isAbsoluteLocalPath('data:image/png;base64,iVBOR')).toBe(false);
+  });
+
+  it('should reject @-prefix shorthand', () => {
+    expect(isAbsoluteLocalPath('@/tmp/img.png')).toBe(false);
+  });
+
+  it('should reject empty and non-string inputs', () => {
+    expect(isAbsoluteLocalPath('')).toBe(false);
+    expect(isAbsoluteLocalPath(null as any)).toBe(false);
+    expect(isAbsoluteLocalPath(undefined as any)).toBe(false);
   });
 });

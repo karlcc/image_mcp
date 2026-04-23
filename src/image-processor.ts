@@ -1,9 +1,9 @@
 import fs from 'fs-extra';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import mimeTypes from 'mime-types';
 import axios from 'axios';
 
-// Define types for image processing
 export interface ImageInfo {
   type: 'file' | 'base64' | 'url';
   data: string;
@@ -17,11 +17,8 @@ export interface ProcessedImage {
   size: number;
 }
 
-/**
- * Image Processor for handling file paths, URLs, and base64 encoded images
- */
 export class ImageProcessor {
-  private static readonly SUPPORTED_MIME_TYPES = [
+  private static readonly SUPPORTED_MIME_TYPES = new Set([
     'image/jpeg',
     'image/png',
     'image/gif',
@@ -29,20 +26,48 @@ export class ImageProcessor {
     'image/svg+xml',
     'image/bmp',
     'image/tiff',
-  ];
+  ]);
+
+  private static readonly SUPPORTED_FILE_EXTENSIONS = new Set([
+    'jpg',
+    'jpeg',
+    'png',
+    'gif',
+    'webp',
+    'bmp',
+    'tiff',
+    'tif',
+    'svg',
+  ]);
+
+  private static readonly HTTP_URL_PATTERN = /^https?:\/\/.+/i;
+  private static readonly HTTP_URL_WITH_PATH_PATTERN = /^https?:\/\/.+\/.+$/i;
 
   private static readonly MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  private static readonly UNSUPPORTED_INPUT_MESSAGE =
+    'Unsupported image input format. Supported formats: file paths, HTTP/HTTPS URLs, and data URLs with base64 encoding.';
 
-  /**
-   * Processes various image input formats (file paths, URLs, base64 data URLs, raw base64)
-   * and converts them to a standardized format for the OpenAI API
-   */
+  /** Supports "@path" local file shorthand used by some MCP clients. */
+  private static normalizeImageInput(imageInput: string): string {
+    const trimmedInput = imageInput.trim();
+    return trimmedInput.startsWith('@') ? trimmedInput.substring(1) : trimmedInput;
+  }
+
+  private static expandTilde(p: string): string {
+    return p.startsWith('~') ? path.join(process.env.HOME || '', p.substring(1)) : p;
+  }
+
   static async processImage(imageInput: string): Promise<ProcessedImage> {
-    let processedInput = imageInput;
+    let processedInput = this.normalizeImageInput(imageInput);
 
-    // Handle file:// URLs by stripping the protocol
-    if (imageInput.startsWith('file://')) {
-      processedInput = imageInput.substring(7); // Remove 'file://' prefix
+    // Handle file:// URLs using Node's built-in decoder (handles percent-encoded non-ASCII correctly)
+    if (processedInput.startsWith('file://')) {
+      try {
+        processedInput = fileURLToPath(processedInput);
+      } catch {
+        // Fallback: strip prefix naively if URL parsing fails
+        processedInput = processedInput.substring(7);
+      }
     }
 
     // Basic validation after processing the input
@@ -53,22 +78,29 @@ export class ImageProcessor {
 
     let imageInfo: ImageInfo;
 
-    // Determine input type and process accordingly
     if (processedInput.startsWith('data:image/') && processedInput.includes('base64')) {
-      // Data URL with base64
       imageInfo = await this.processBase64Input(processedInput);
-    } else if (/^https?:\/\/.+/i.test(processedInput)) {
-      // HTTP/HTTPS URL - download the image
+    } else if (this.HTTP_URL_PATTERN.test(processedInput)) {
       imageInfo = await this.processUrlInput(processedInput);
     } else if (this.isFileInput(processedInput)) {
-      // File path
       imageInfo = await this.processFileInput(processedInput);
     } else {
-      throw new Error('Unsupported image input format. Supported formats: file paths, HTTP/HTTPS URLs, and data URLs with base64 encoding.');
+      // Last-resort fallback: probe filesystem for non-ASCII or unusual paths
+      // that don't match heuristics (e.g. 桌面/截图 with no prefix or extension)
+      const expandedPath = this.expandTilde(processedInput);
+      const absolutePath = path.resolve(expandedPath);
+      try {
+        const stats = await fs.stat(absolutePath);
+        if (stats.isFile()) {
+          imageInfo = await this.processFileInput(processedInput);
+        } else {
+          throw new Error(this.UNSUPPORTED_INPUT_MESSAGE);
+        }
+      } catch (e: any) {
+        if (e.message?.startsWith('Unsupported')) throw e;
+        throw new Error(this.UNSUPPORTED_INPUT_MESSAGE);
+      }
     }
-
-    // Validate image
-    this.validateImage(imageInfo);
 
     // Convert to URL format
     const url = this.formatImageUrl(imageInfo);
@@ -80,68 +112,57 @@ export class ImageProcessor {
     };
   }
 
-  /**
-   * Determines whether the input string represents a file path or other input type
-   * Uses heuristics to distinguish between file paths, URLs, and base64 data
-   */
   private static isFileInput(input: string): boolean {
-    // Check for HTTP/HTTPS URLs
-    if (/^https?:\/\/.+/i.test(input)) {
-      return false; // It's a URL
+    const isWindowsDrivePath = /^[A-Za-z]:[\\/]/.test(input);
+    const isUncPath = input.startsWith('\\\\');
+
+    if (this.HTTP_URL_PATTERN.test(input)) {
+      return false;
     }
 
-    // Check for file:// URLs
     if (input.startsWith('file://')) {
-      return true; // It's a file URL
+      return true;
     }
 
-    // Check for data URLs with base64
     if (input.startsWith('data:image/') && input.includes('base64')) {
-      return false; // It's a data URL
+      return false;
     }
 
-    // Check for path-like patterns
     return (
       input.startsWith('/') ||
-      input.startsWith('./') ||
+      input.startsWith('~') ||
       input.startsWith('../') ||
-      input.startsWith('/([A-Za-z]:\\|\\\\)/') ||   //  Windows drive or UNC path
+      isWindowsDrivePath ||
+      isUncPath ||
       !!input.match(/^\.[/\\]/) ||
-      // Check if it has a file extension that looks like an image
-      (input.includes('.') && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff'].includes(input.split('.').pop()?.toLowerCase() || ''))
+      this.SUPPORTED_FILE_EXTENSIONS.has(path.extname(input).toLowerCase().replace(/^\./, ''))
     );
   }
 
-  /**
-   * Process file path input
-   */
   private static async processFileInput(filePath: string): Promise<ImageInfo> {
     try {
-      // Resolve absolute path
-      const absolutePath = path.resolve(filePath);
-      
-      // Check if file exists
-      if (!(await fs.pathExists(absolutePath))) {
-        throw new Error(`File not found: ${filePath}`);
+      const absolutePath = path.resolve(this.expandTilde(filePath));
+
+      let stats;
+      try {
+        stats = await fs.stat(absolutePath);
+      } catch (e: any) {
+        if (e.code === 'ENOENT') {
+          throw new Error(`File not found: ${filePath}`);
+        }
+        throw e;
       }
 
-      // Get file stats
-      const stats = await fs.stat(absolutePath);
-      
-      // Check file size
       if (stats.size > this.MAX_FILE_SIZE) {
         throw new Error(`File size exceeds maximum limit of ${this.MAX_FILE_SIZE} bytes`);
       }
 
-      // Detect MIME type
       const mimeType = mimeTypes.lookup(absolutePath) || 'application/octet-stream';
-      
-      // Verify it's an image
-      if (!this.SUPPORTED_MIME_TYPES.includes(mimeType)) {
+
+      if (!this.SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new Error(`Unsupported image type: ${mimeType}`);
       }
 
-      // Read file as base64
       const base64Data = await fs.readFile(absolutePath, 'base64');
 
       return {
@@ -158,75 +179,39 @@ export class ImageProcessor {
     }
   }
 
-  /**
-   * Process URL input
-   */
   private static async processUrlInput(url: string): Promise<ImageInfo> {
     try {
-      // Validate URL format
-      const urlPattern = /^https?:\/\/.+\/.+$/i;
-      if (!urlPattern.test(url)) {
+      if (!this.HTTP_URL_WITH_PATH_PATTERN.test(url)) {
         throw new Error(`Invalid image URL format: ${url}`);
       }
 
-      // Download the image
       const response = await axios.get(url, {
         responseType: 'arraybuffer',
         timeout: 30000, // 30 seconds timeout
         maxRedirects: 5,
       });
 
-      // Check response status
       if (response.status !== 200) {
         throw new Error(`Failed to download image. HTTP status: ${response.status}`);
       }
 
-      // Get image data
       const imageData = Buffer.from(response.data);
       const size = imageData.length;
 
-      // Check file size
       if (size > this.MAX_FILE_SIZE) {
         throw new Error(`Image size exceeds maximum limit of ${this.MAX_FILE_SIZE} bytes`);
       }
 
-      // Detect MIME type from response headers or file extension
       let mimeType = response.headers['content-type'];
       if (!mimeType) {
-        // Fallback to extension-based detection
         const ext = path.extname(new URL(url).pathname).toLowerCase();
-        switch (ext) {
-          case '.jpg':
-          case '.jpeg':
-            mimeType = 'image/jpeg';
-            break;
-          case '.png':
-            mimeType = 'image/png';
-            break;
-          case '.gif':
-            mimeType = 'image/gif';
-            break;
-          case '.webp':
-            mimeType = 'image/webp';
-            break;
-          case '.bmp':
-            mimeType = 'image/bmp';
-            break;
-          case '.tiff':
-          case '.tif':
-            mimeType = 'image/tiff';
-            break;
-          default:
-            mimeType = 'image/jpeg'; // Default
-        }
+        mimeType = mimeTypes.lookup(ext) || 'image/jpeg';
       }
 
-      // Verify it's an image
-      if (!this.SUPPORTED_MIME_TYPES.includes(mimeType)) {
+      if (!this.SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new Error(`Unsupported image type: ${mimeType}`);
       }
 
-      // Convert to base64
       const base64Data = imageData.toString('base64');
 
       return {
@@ -243,27 +228,20 @@ export class ImageProcessor {
     }
   }
 
-  /**
-   * Process base64 input
-   */
   private static async processBase64Input(base64Input: string): Promise<ImageInfo> {
     try {
-      // Extract MIME type from base64 header
       const base64Match = base64Input.match(/^data:([^;]+);base64,/);
-      let mimeType = 'image/jpeg'; // default
+      let mimeType = 'image/jpeg';
       
       if (base64Match) {
         mimeType = base64Match[1] || 'image/jpeg';
-        // Remove the data URL prefix
         base64Input = base64Input.replace(/^data:[^;]+;base64,/, '');
       }
 
-      // Verify it's an image
-      if (!this.SUPPORTED_MIME_TYPES.includes(mimeType)) {
+      if (!this.SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new Error(`Unsupported image type: ${mimeType}`);
       }
 
-      // Validate base64 length (rough size estimate)
       const base64Length = base64Input.length;
       const size = Math.floor(base64Length * 3 / 4); // Approximate size in bytes
       
@@ -271,7 +249,6 @@ export class ImageProcessor {
         throw new Error(`Base64 image exceeds maximum limit of ${this.MAX_FILE_SIZE} bytes`);
       }
 
-      // Validate base64 format
       if (!this.isValidBase64(base64Input)) {
         throw new Error('Invalid base64 format');
       }
@@ -290,43 +267,10 @@ export class ImageProcessor {
     }
   }
 
-  /**
-   * Validate image info
-   */
-  private static validateImage(imageInfo: ImageInfo): void {
-    // Validate MIME type
-    if (!this.SUPPORTED_MIME_TYPES.includes(imageInfo.mimeType)) {
-      throw new Error(`Unsupported image type: ${imageInfo.mimeType}`);
-    }
-
-    // Validate file size
-    if (imageInfo.size > this.MAX_FILE_SIZE) {
-      throw new Error(`Image size exceeds maximum limit of ${this.MAX_FILE_SIZE} bytes`);
-    }
-
-    // Validate base64 data if applicable
-    if (imageInfo.type === 'base64' || imageInfo.type === 'url') {
-      if (!this.isValidBase64(imageInfo.data)) {
-        throw new Error('Invalid base64 format');
-      }
-    }
-  }
-
-  /**
-   * Format image URL for OpenAI API
-   */
   private static formatImageUrl(imageInfo: ImageInfo): string {
-    if (imageInfo.type === 'base64') {
-      return `data:${imageInfo.mimeType};base64,${imageInfo.data}`;
-    } else {
-      // For file inputs, we've already converted to base64
-      return `data:${imageInfo.mimeType};base64,${imageInfo.data}`;
-    }
+    return `data:${imageInfo.mimeType};base64,${imageInfo.data}`;
   }
 
-  /**
-   * Validate base64 format
-   */
   private static isValidBase64(str: string): boolean {
     try {
       // Remove whitespace
@@ -339,23 +283,14 @@ export class ImageProcessor {
     }
   }
 
-  /**
-   * Get supported MIME types
-   */
   static getSupportedMimeTypes(): string[] {
     return [...this.SUPPORTED_MIME_TYPES];
   }
 
-  /**
-   * Get maximum file size in bytes
-   */
   static getMaxFileSize(): number {
     return this.MAX_FILE_SIZE;
   }
 
-  /**
-   * Validate image input schema
-   */
   static validateImageInput(imageInput: string): { isValid: boolean; errors: string[] } {
     const errors: string[] = [];
 
@@ -364,30 +299,31 @@ export class ImageProcessor {
       return { isValid: false, errors };
     }
 
-    if (imageInput.length === 0) {
+    const normalizedInput = this.normalizeImageInput(imageInput);
+
+    if (normalizedInput.length === 0) {
       errors.push('Image input cannot be empty');
     }
 
-    if (imageInput.length > 200 * 1024) { // 200KB limit for string input
+    if (normalizedInput.length > 200 * 1024) { // 200KB limit for string input
       errors.push('Image input is too large (max 200KB)');
     }
 
     // Check if it looks like a file path
-    if (this.isFileInput(imageInput)) {
-      if (!imageInput.match(/^[\/.]/) && !imageInput.includes('.')) {
+    if (this.isFileInput(normalizedInput)) {
+      if (!normalizedInput.match(/^[\/.]/) && !normalizedInput.includes('.')) {
         errors.push('File path must be absolute, relative, or include a file extension');
       }
-    } else if (/^https?:\/\/.+/i.test(imageInput)) {
+    } else if (this.HTTP_URL_PATTERN.test(normalizedInput)) {
       // URL validation
-      const urlPattern = /^https?:\/\/.+\/.+$/i;
-      if (!urlPattern.test(imageInput)) {
+      if (!this.HTTP_URL_WITH_PATH_PATTERN.test(normalizedInput)) {
         errors.push('Invalid image URL format. Supported formats: jpg, jpeg, png, gif, webp, bmp, tiff');
       }
-    } else if (imageInput.startsWith('data:image/') && imageInput.includes('base64')) {
+    } else if (normalizedInput.startsWith('data:image/') && normalizedInput.includes('base64')) {
       // Data URL validation - this is valid
     } else {
       // Unsupported input format
-      errors.push('Unsupported image input format. Supported formats: file paths, HTTP/HTTPS URLs, and data URLs with base64 encoding.');
+      errors.push(this.UNSUPPORTED_INPUT_MESSAGE);
     }
 
     return {
