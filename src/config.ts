@@ -5,10 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 
+const ReasoningEffortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+type ReasoningEffort = typeof ReasoningEffortValues[number];
+
 const ConfigSchema = z.object({
   apiKey: z.string().min(1, 'API key is required'),
   baseUrl: z.string().url().default('http://localhost:9292/v1'),
   model: z.string().optional(),
+  reasoningEffort: z.enum(ReasoningEffortValues).optional(),
   streaming: z.boolean().default(true),
   timeout: z.number().min(1000).max(300000).default(60000),
   maxRetries: z.number().min(0).max(5).default(3),
@@ -24,6 +28,7 @@ const PersistedConfigSchema = z.object({
   apiKey: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
   model: z.string().optional(),
+  reasoningEffort: z.enum(ReasoningEffortValues).optional(),
   streaming: z.boolean().optional(),
   timeout: z.number().int().min(1000).max(300000).optional(),
   maxRetries: z.number().int().min(0).max(5).optional(),
@@ -104,6 +109,7 @@ export class ConfigManager {
       .option('-k, --api-key <key>', 'OpenAI API key')
       .option('-u, --base-url <url>', 'OpenAI API base URL')
       .option('-m, --model <model>', 'Default model to use')
+      .option('--reasoning-effort <level>', 'Reasoning effort: none, minimal, low, medium, high, xhigh')
       .option('--no-streaming', 'Disable streaming responses')
       .option('--http', 'Enable HTTP/SSE transport mode')
       .option('-p, --mcp-port <port>', 'HTTP port for MCP server', parseInt)
@@ -119,6 +125,7 @@ export class ConfigManager {
       apiKey?: string;
       baseUrl?: string;
       model?: string;
+      reasoningEffort?: string;
       streaming?: boolean;
       http?: boolean;
       mcpPort?: number;
@@ -144,6 +151,7 @@ export class ConfigManager {
       apiKey: cliOptions.apiKey ?? parseNonEmptyString(process.env.OPENAI_API_KEY) ?? fileConfig.apiKey ?? DEFAULT_CONFIG.apiKey,
       baseUrl: cliOptions.baseUrl ?? parseNonEmptyString(process.env.OPENAI_BASE_URL) ?? fileConfig.baseUrl ?? DEFAULT_CONFIG.baseUrl,
       model: cliOptions.model ?? parseNonEmptyString(process.env.OPENAI_MODEL) ?? fileConfig.model,
+      reasoningEffort: cliOptions.reasoningEffort ?? parseNonEmptyString(process.env.OPENAI_REASONING_EFFORT) ?? fileConfig.reasoningEffort ?? DEFAULT_CONFIG.reasoningEffort,
       // Commander's `--no-streaming` defaults `streaming` to `true` when the flag is omitted,
       // so we only treat an explicit `false` as CLI input. Everything else falls through to env/config.
       streaming: (cliOptions.streaming === false ? false : undefined) ?? parseBoolean(process.env.OPENAI_STREAMING) ?? fileConfig.streaming ?? DEFAULT_CONFIG.streaming,
@@ -234,6 +242,10 @@ export class ConfigManager {
     return this.config.model ?? '';
   }
 
+  getReasoningEffort(): ReasoningEffort | undefined {
+    return this.config.reasoningEffort;
+  }
+
   isStreamingEnabled(): boolean {
     return this.config.streaming;
   }
@@ -263,6 +275,7 @@ export class ConfigManager {
       apiKey: maskApiKey(this.config.apiKey),
       baseUrl: this.config.baseUrl,
       model: this.config.model ?? '',
+      reasoningEffort: this.config.reasoningEffort ?? null,
       streaming: this.config.streaming,
       useHttp: this.config.useHttp,
       mcpPort: this.config.mcpPort,
@@ -294,6 +307,7 @@ export class ConfigManager {
       apiKey: config.apiKey,
       baseUrl: config.baseUrl,
       model: config.model,
+      reasoningEffort: config.reasoningEffort,  // undefined values omitted by JSON.stringify
       streaming: config.streaming,
       timeout: config.timeout,
       maxRetries: config.maxRetries,

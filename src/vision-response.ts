@@ -13,6 +13,13 @@ export class VisionFailureError extends Error {
   }
 }
 
+export class EmptyModelResponseError extends Error {
+  constructor() {
+    super('No response received from model');
+    this.name = 'EmptyModelResponseError';
+  }
+}
+
 export interface VisionResponseContext {
   loadedSummary: string;
   model: string;
@@ -24,8 +31,8 @@ export function buildVisionGuardPrompt(userPrompt: string): string {
 
   return [
     `Inspect the actual image pixels before answering.`,
-    `If you cannot directly analyze the image content, respond with exactly "${VISION_FAILURE_SENTINEL}".`,
     'Do not infer anything from filenames, paths, timestamps, metadata, or surrounding conversation.',
+    'Respond with text only. Do not generate, produce, or return any images, image URLs, or links.',
     trimmedPrompt,
   ].join(' ');
 }
@@ -34,10 +41,19 @@ export function assertVisionResponse(responseText: string, context: VisionRespon
   const failureReason = detectVisionFailure(responseText, context.sourceHints);
 
   if (!failureReason) {
-    return responseText.trim();
+    return stripGrokAssetUrls(responseText.trim());
   }
 
   throw new VisionFailureError(failureReason, context.model || 'configured model', context.loadedSummary);
+}
+
+/**
+ * Some OpenAI-compatible gateways (e.g. grok2api) append a hosted asset URL
+ * like "https://assets.grok.com/users/.../generated/.../image.jpg" to the
+ * response text. This is not part of the vision analysis and should be stripped.
+ */
+export function stripGrokAssetUrls(text: string): string {
+  return text.replace(/\n*https:\/\/assets\.grok\.com\/[^\s]+\.(?:jpg|jpeg|png|gif|webp)\n?/gi, '').trim();
 }
 
 type VisionFailureReason = 'explicit' | 'hallucinated';
@@ -90,6 +106,8 @@ function detectVisionFailure(
     'cannot view the image',
   ];
 
+  // The sentinel is kept for backward compatibility with models that were
+  // previously instructed to emit it, even though the prompt no longer asks for it.
   if (explicitFailureIndicators.some((indicator) => lower.includes(indicator))) {
     return 'explicit';
   }

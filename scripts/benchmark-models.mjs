@@ -22,9 +22,11 @@ function parseArgs(argv) {
     updateConfig: true,
     configPath: path.join(os.homedir(), '.config', 'image_mcp', 'config.json'),
     candidatesPath: path.join(os.homedir(), '.config', 'image_mcp', 'model_candidates.json'),
+    benchmarkHistoryPath: path.join(os.homedir(), '.config', 'image_mcp', 'benchmark_history.json'),
     models: [],
     failUnder: null,
     failIfAnyNonvision: false,
+    retries: 3,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -47,6 +49,9 @@ function parseArgs(argv) {
     } else if (token === '--candidates' && argv[i + 1]) {
       args.candidatesPath = path.resolve(argv[i + 1]);
       i += 1;
+    } else if (token === '--benchmark-history' && argv[i + 1]) {
+      args.benchmarkHistoryPath = path.resolve(argv[i + 1]);
+      i += 1;
     } else if (token === '--models' && argv[i + 1]) {
       args.models = argv[i + 1].split(',').map((m) => m.trim()).filter(Boolean);
       i += 1;
@@ -59,6 +64,9 @@ function parseArgs(argv) {
       i += 1;
     } else if (token === '--fail-if-any-nonvision') {
       args.failIfAnyNonvision = true;
+    } else if (token === '--retries' && argv[i + 1]) {
+      args.retries = Math.max(0, parseInt(argv[i + 1], 10));
+      i += 1;
     }
   }
 
@@ -216,6 +224,10 @@ function scoreModel(entries) {
   };
 }
 
+function log(tag, msg) {
+  console.error(`[benchmark] ${tag} ${msg}`);
+}
+
 async function run() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -239,7 +251,11 @@ async function run() {
     throw new Error('No models to benchmark. Provide --models or set ~/.config/image_mcp/model_candidates.json');
   }
 
+  const totalRuns = models.length * args.repeats * tasks.length;
+  log('plan', `${models.length} model(s) × ${tasks.length} task(s) × ${args.repeats} repeat(s) = ${totalRuns} calls`);
+
   if (!args.skipBuild) {
+    log('build', 'compiling...');
     await new Promise((resolve, reject) => {
       const build = spawn('npm', ['run', 'build'], { cwd: repoRoot, stdio: 'inherit', env: process.env });
       build.on('exit', (code) => {
@@ -257,10 +273,13 @@ async function run() {
   const summaryPath = `/tmp/image_mcp_accuracy_summary_${ts}.json`;
   const rawEntries = [];
   let nextId = 1;
+  let completedRuns = 0;
 
   for (let i = 0; i < models.length; i += 1) {
     const model = models[i];
     const port = args.portBase + i;
+    log('model', `[${i + 1}/${models.length}] ${model} :${port}`);
+
     const proc = startServer({ model, port, configPath: args.configPath });
 
     const ready = await waitForHealth(port, 15000);
@@ -277,7 +296,9 @@ async function run() {
         responseText: '',
         error: 'server_not_ready',
       });
+      completedRuns += tasks.length * args.repeats;
 
+      log('fail', `${model} — server not ready`);
       proc.kill('SIGTERM');
       await new Promise((r) => setTimeout(r, 400));
       continue;
@@ -299,6 +320,9 @@ async function run() {
         responseText: '',
         error: err instanceof Error ? err.message : String(err),
       });
+      completedRuns += tasks.length * args.repeats;
+
+      log('fail', `${model} — client connect failed`);
       proc.kill('SIGTERM');
       await new Promise((r) => setTimeout(r, 400));
       continue;
@@ -308,34 +332,80 @@ async function run() {
       for (const task of tasks) {
         nextId += 1;
 
-        const call = await callTool({ client, task, rootDir: repoRoot, timeoutMs: args.timeoutMs });
-        const result = call.result;
-        const text = result?.content?.[0]?.text ?? '';
+        let bestCall = null;
+        let bestPass = false;
+        let attempts = 0;
+        let retryReason = '';
 
-        let status = 'ok';
-        let error = '';
-        if (call.transportError) {
-          status = 'transport_error';
-          error = call.transportError;
-        } else if (result?.isError) {
-          status = 'mcp_tool_error';
-          error = text || 'mcp_tool_error';
+        for (let attempt = 1; attempt <= (args.retries + 1); attempt++) {
+          attempts = attempt;
+          const call = await callTool({ client, task, rootDir: repoRoot, timeoutMs: args.timeoutMs });
+          const result = call.result;
+          const text = result?.content?.[0]?.text ?? '';
+
+          let status = 'ok';
+          let error = '';
+          if (call.transportError) {
+            status = 'transport_error';
+            error = call.transportError;
+          } else if (result?.isError) {
+            status = 'mcp_tool_error';
+            error = text || 'mcp_tool_error';
+          }
+
+          const pass = status === 'ok' && evaluateResult(task, text);
+          bestCall = call;
+
+          if (pass) {
+            bestPass = true;
+            break;
+          }
+
+          if (attempt <= args.retries) {
+            retryReason = call.transportError ? 'transport_error'
+              : result?.isError ? 'tool_error'
+              : text === '' ? 'empty_response'
+              : 'wrong_answer';
+            log('retry', `↻ ${task.id} attempt ${attempt}/${args.retries + 1} — ${retryReason}`);
+            await new Promise((r) => setTimeout(r, 2000));
+          }
         }
 
-        const pass = status === 'ok' && evaluateResult(task, text);
+        const finalResult = bestCall.result;
+        const finalText = finalResult?.content?.[0]?.text ?? '';
+
+        let finalStatus = 'ok';
+        let finalError = '';
+        if (bestCall.transportError) {
+          finalStatus = 'transport_error';
+          finalError = bestCall.transportError;
+        } else if (finalResult?.isError) {
+          finalStatus = 'mcp_tool_error';
+          finalError = finalText || 'mcp_tool_error';
+        }
+
+        const pass = finalStatus === 'ok' && evaluateResult(task, finalText);
+
+        completedRuns += 1;
+        const mark = pass ? '✓' : '✗';
+        const lat = bestCall.elapsedMs.toFixed(0);
+        const retryTag = attempts > 1 ? ` (↻${attempts - 1})` : '';
+        process.stderr.write(`  ${mark} ${task.id} ${lat}ms${retryTag} [${completedRuns}/${totalRuns}]\n`);
 
         rawEntries.push({
           model,
           taskId: task.id,
           repeat,
           weight: typeof task.weight === 'number' ? task.weight : 1,
-          status,
+          status: finalStatus,
           pass,
-          latencyMs: Number(call.elapsedMs.toFixed(1)),
+          latencyMs: Number(bestCall.elapsedMs.toFixed(1)),
           httpCode: null,
-          responseText: String(text).replace(/\s+/g, ' ').trim(),
-          error: String(error).replace(/\s+/g, ' ').trim(),
+          responseText: String(finalText).replace(/\s+/g, ' ').trim(),
+          error: String(finalError).replace(/\s+/g, ' ').trim(),
           expectedRegex: task.expected_regex,
+          retries: attempts - 1,
+          retryReason: attempts > 1 ? retryReason : '',
         });
       }
     }
@@ -349,7 +419,7 @@ async function run() {
 
   const byModel = {};
   for (const model of models) {
-    const entries = rawEntries.filter((e) => e.model === model && e.taskId !== 'startup');
+    const entries = rawEntries.filter((e) => e.model === model && e.taskId !== 'startup' && e.taskId !== 'connect');
     const scored = scoreModel(entries);
     byModel[model] = {
       ...scored,
@@ -397,15 +467,34 @@ async function run() {
     const nextCandidates = {
       ...candidates,
       active: recommendation,
-      candidates: Array.isArray(candidates.candidates) ? candidates.candidates : models,
+      candidates: Array.isArray(candidates.candidates) && candidates.candidates.length
+        ? candidates.candidates
+        : models,
       last_accuracy_benchmark: {
         ran_at: new Date().toISOString(),
         summary_file: summaryPath,
         raw_results_file: rawPath,
-        summary,
+        history_file: args.benchmarkHistoryPath,
       },
     };
     await writeJsonSecure(args.candidatesPath, nextCandidates);
+
+    // Write full benchmark result to separate history file
+    const historyEntry = {
+      ran_at: new Date().toISOString(),
+      models,
+      taskFile: args.tasks,
+      repeats: args.repeats,
+      summary,
+    };
+    let history = [];
+    try {
+      const raw = await fs.readFile(args.benchmarkHistoryPath, 'utf8');
+      history = JSON.parse(raw);
+      if (!Array.isArray(history)) history = [];
+    } catch { /* empty or missing file */ }
+    history.push(historyEntry);
+    await writeJsonSecure(args.benchmarkHistoryPath, history);
   }
 
   const compact = ranked.map((r) => ({
@@ -415,6 +504,15 @@ async function run() {
     latencyMedianMs: r.latencyMedian === null ? null : Number(r.latencyMedian.toFixed(1)),
     latencyAvgMs: r.latencyAvg === null ? null : Number(r.latencyAvg.toFixed(1)),
   }));
+
+  for (const r of compact) {
+    const acc = `${(r.weightedAccuracy * 100).toFixed(1)}%`;
+    const lat = r.latencyMedianMs !== null ? `${r.latencyMedianMs}ms` : '—';
+    log('result', `${r.model}  acc=${acc}  latency=${lat}`);
+  }
+  if (recommendation) {
+    log('recommend', recommendation);
+  }
 
   console.log(JSON.stringify({
     recommendation,

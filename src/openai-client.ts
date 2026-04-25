@@ -10,6 +10,7 @@ export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   max_tokens?: number;
   temperature?: number;
   top_p?: number;

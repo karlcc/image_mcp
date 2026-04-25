@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run type-check` — `tsc --noEmit`
 - `npm run test:smoke` — Vision smoke tests (requires `IMAGE_MCP_SMOKE=1` + live API config)
 - `npm run preflight` — Lint + type-check + smoke tests (pre-release gate)
-- `npm run benchmark:models` — Accuracy benchmark harness (`scripts/benchmark-models.mjs`, uses MCP SDK client)
+- `npm run benchmark:models` — Accuracy benchmark harness (`scripts/benchmark-models.mjs`, uses MCP SDK client). Requires `~/.config/image_mcp/model_candidates.json` with a `models` array.
 
 ## Architecture
 
@@ -23,11 +23,11 @@ MCP server that proxies image files to an OpenAI-compatible vision endpoint. Two
 
 | File | Role |
 |---|---|
-| `src/config.ts` | `ConfigManager` singleton. Parses CLI args (commander) + env vars + defaults via zod schema. Config precedence: CLI > env > defaults. Persistent config saved to `~/.config/image_mcp/config.json`. |
+| `src/config.ts` | `ConfigManager` singleton. Parses CLI args (commander) + env vars + defaults via zod schema. Config precedence: CLI > env > defaults. Persistent config saved to `~/.config/image_mcp/config.json`. Supports `--reasoning-effort` / `OPENAI_REASONING_EFFORT` (values: none, minimal, low, medium, high, xhigh). |
 | `src/image-processor.ts` | `ImageProcessor` static class. Normalizes input (`@`-prefix shorthand, `file://` stripping), detects input type (file path / HTTP URL / data URL / raw base64), reads and converts all inputs to base64 data URLs for the API. Validates MIME type and 10MB size limit. |
 | `src/openai-client.ts` | `OpenAIClient` class. Axios-based client with exponential-backoff retry (1s→2s→4s→..., capped 30s). Supports streaming and non-streaming chat completions. Retries on network errors, 5xx, and 429. |
-| `src/index.ts` | Server entrypoint. Registers 3 MCP tools and their handlers. `dispatchToolCall` switch routes by tool name. Stdio and HTTP/SSE transport setup. |
-| `src/vision-response.ts` | Vision guard system — `buildVisionGuardPrompt()` appends anti-hallucination instructions to user prompts; `assertVisionResponse()` validates API responses don't contain non-vision text patterns. |
+| `src/index.ts` | Server entrypoint. Registers 3 MCP tools and their handlers. `dispatchToolCall` switch routes by tool name. Stdio and HTTP/SSE transport setup. `extractMessageText()` handles thinking models (reads `reasoning_content`/`reasoning` when `content` is empty). |
+| `src/vision-response.ts` | Vision guard system — `buildVisionGuardPrompt()` appends anti-hallucination instructions to user prompts; `assertVisionResponse()` validates API responses don't contain non-vision text patterns. `stripGrokAssetUrls()` removes hosted asset URLs that some gateways (e.g. grok2api) append to responses. |
 | `src/vision-probe.ts` | Runtime probe to detect whether the configured model supports vision/image inputs. |
 
 ### Data flow
@@ -42,7 +42,12 @@ MCP server that proxies image files to an OpenAI-compatible vision endpoint. Two
 
 - **ConfigManager is a singleton** (`configManager` exported from `config.ts`) — constructed at import time, parses `process.argv` immediately. Tests must mock/restore `process.argv` and `process.env` for isolation.
 - **ImageProcessor is all static methods** — no state, no instantiation needed.
-- **Streaming is HTTP-only** — stdio mode always uses non-streaming requests; SSE mode can stream when enabled.
+- **Streaming is controlled by `streaming` config only** — no longer gated on `useHttp`. Stdio mode can stream when `streaming=true`.
+- **`reasoning_effort` is conditionally injected** — only added to chat requests when `getReasoningEffort()` returns a value. Not included by default.
+- **Thinking models** — some models return analysis in `reasoning_content` or `reasoning` instead of `content`. `extractMessageText()` checks all three fields.
+- **Grok asset URL stripping** — gateways like grok2api append `https://assets.grok.com/...` image URLs to responses; these are stripped by `assertVisionResponse()`.
+- **Image-type-aware default prompts** — `DEFAULT_SUMMARIZE_PROMPT` and `DEFAULT_COMPARE_PROMPT` in `index.ts` guide the model toward OCR, UI description, chart extraction, or scene description depending on content. Tool schema `default` fields must stay in sync.
+- **Grok model access tiers** — `grok-4.20-auto` and `grok-4.20-beta` return 403 for basic-tier accounts; only `grok-4.20-fast` works reliably. Do not add AUTO/EXPERT models to `model_candidates.json`.
 - **Module type: ESM** (`"type": "module"` in package.json). TypeScript targets ES2022 with ESNext modules. Imports use `.js` extension for compiled output.
 - **3 MCP tools**: `read_image_via_vision_backend`, `compare_images_via_vision_backend`, `get_config_info`. The image tools accept local absolute paths, http(s) URLs, and data URLs.
 - **Server instructions field** — the `Server` constructor includes `instructions` describing the vision-capable backend.

@@ -181,4 +181,81 @@ describe('ConfigManager configuration precedence', () => {
     const stat = await fs.stat(configPath);
     expect(stat.mode & 0o777).toBe(0o600);
   });
+
+  it('accepts --reasoning-effort from CLI', async () => {
+    process.argv = ['node', 'image_mcp', '--config', configPath, '--reasoning-effort', 'high'];
+    process.env = {
+      ...originalEnv,
+      OPENAI_API_KEY: 'test-key',
+      OPENAI_BASE_URL: '',
+      OPENAI_REASONING_EFFORT: '',
+    };
+
+    const { ConfigManager } = await import('../src/config');
+    const manager = new ConfigManager();
+
+    expect(manager.getReasoningEffort()).toBe('high');
+  });
+
+  it('accepts OPENAI_REASONING_EFFORT from env', async () => {
+    process.argv = ['node', 'image_mcp', '--config', configPath];
+    process.env = {
+      ...originalEnv,
+      OPENAI_API_KEY: 'test-key',
+      OPENAI_REASONING_EFFORT: 'medium',
+    };
+
+    const { ConfigManager } = await import('../src/config');
+    const manager = new ConfigManager();
+
+    expect(manager.getReasoningEffort()).toBe('medium');
+  });
+
+  it('CLI --reasoning-effort overrides env', async () => {
+    process.argv = ['node', 'image_mcp', '--config', configPath, '--reasoning-effort', 'low'];
+    process.env = {
+      ...originalEnv,
+      OPENAI_API_KEY: 'test-key',
+      OPENAI_REASONING_EFFORT: 'high',
+    };
+
+    const { ConfigManager } = await import('../src/config');
+    const manager = new ConfigManager();
+
+    expect(manager.getReasoningEffort()).toBe('low');
+  });
+
+  it('returns undefined when reasoning-effort is not configured', async () => {
+    process.argv = ['node', 'image_mcp', '--config', configPath];
+    process.env = {
+      ...originalEnv,
+      OPENAI_API_KEY: 'test-key',
+      OPENAI_REASONING_EFFORT: '',
+    };
+
+    const { ConfigManager } = await import('../src/config');
+    const manager = new ConfigManager();
+
+    expect(manager.getReasoningEffort()).toBeUndefined();
+  });
+
+  it('persists reasoning_effort to config file', async () => {
+    process.argv = [
+      'node', 'image_mcp', '--config', configPath,
+      '--api-key', 'test-key',
+      '--reasoning-effort', 'xhigh',
+      '--save-config',
+    ];
+    process.env = {
+      ...originalEnv,
+      OPENAI_API_KEY: '',
+      OPENAI_REASONING_EFFORT: '',
+    };
+
+    const { ConfigManager } = await import('../src/config');
+    new ConfigManager();
+
+    const persisted = await fs.readJson(configPath);
+    expect(persisted.reasoningEffort).toBe('xhigh');
+  });
 });
