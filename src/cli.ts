@@ -8,7 +8,7 @@ import { resolveConfig, maskApiKey, saveConfigFile, parseNonEmptyString, type Cl
 import { OpenAIClient } from './openai-client.js';
 import { readImage, compareImages, type HandlerContext } from './handlers.js';
 
-const pkgVersion = '1.1.0-beta.1';
+const pkgVersion = '1.1.0-beta.2';
 
 // --- Output formatting ---
 
