@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { resolveConfig, saveConfigFile, maskApiKey, type CliOverrides, type Config, type ReasoningEffort } from './config.js';
 
-const pkgVersion = '1.1.0-beta.0';
+const pkgVersion = '1.1.0-beta.1';
 
 export class ConfigManager {
   private config: Config;
