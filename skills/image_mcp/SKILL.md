@@ -29,6 +29,7 @@ image-mcp config
 | `image-mcp read --smoke-test` | Verify config + API connectivity |
 | `image-mcp compare <img1> <img2> [...more] [--task "..."]` | Compare 2+ images — diffs, similarities |
 | `image-mcp config [--json]` | Show current configuration |
+| `image-mcp config --init [--api-key --base-url --model]` | Write config file from flags or env vars |
 | `image-mcp install-skill` | Install this skill to ~/.claude/skills/ |
 
 ## Global flags
@@ -87,17 +88,19 @@ Fallback (no global install):
 npx @karlcc/image_mcp read <path>
 ```
 
-Verify config and API key:
+Verify config:
 
 ```bash
 image-mcp config
 ```
 
-If API key is missing, set via environment variable:
+If configuration is incomplete (missing apiKey or model), initialize it:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+image-mcp config --init --api-key <key> --base-url <url> --model <model>
 ```
+
+This writes to `~/.config/image_mcp/config.json`. Values can also be picked up from env vars (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`).
 
 Verify end-to-end connectivity:
 

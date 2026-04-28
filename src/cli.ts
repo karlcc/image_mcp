@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveConfig, maskApiKey, type CliOverrides, type Config } from './config.js';
+import { resolveConfig, maskApiKey, saveConfigFile, parseNonEmptyString, type CliOverrides, type Config } from './config.js';
 import { OpenAIClient } from './openai-client.js';
 import { readImage, compareImages, type HandlerContext } from './handlers.js';
 
@@ -101,9 +101,13 @@ program
 program
   .command('config')
   .description('Show current configuration')
-  .action(async () => {
+  .option('--init', 'Write config file (~/.config/image_mcp/config.json) from provided flags or env vars')
+  .option('--api-key <key>', 'API key for --init')
+  .option('--base-url <url>', 'API base URL for --init')
+  .option('--model <model>', 'Model name for --init')
+  .action(async (opts: { init?: boolean; apiKey?: string; baseUrl?: string; model?: string }, cmd: Command) => {
     const globalOpts = getGlobalOpts();
-    await runConfig(globalOpts);
+    await runConfig(globalOpts, opts, cmd);
   });
 
 // --- install-skill subcommand ---
@@ -191,8 +195,43 @@ async function runCompare(images: string[], task: string | undefined, opts: CliO
   }
 }
 
-async function runConfig(opts: CliOverrides & { json?: boolean; raw?: boolean }) {
+async function runConfig(opts: CliOverrides & { json?: boolean; raw?: boolean }, initOpts: { init?: boolean; apiKey?: string; baseUrl?: string; model?: string }, cmd: Command) {
   try {
+    if (initOpts.init) {
+      // Build overrides: --init flags > global flags > env vars
+      const initOverrides: CliOverrides = {
+        apiKey: initOpts.apiKey ?? opts.apiKey ?? parseNonEmptyString(process.env.OPENAI_API_KEY),
+        baseUrl: initOpts.baseUrl ?? opts.baseUrl ?? parseNonEmptyString(process.env.OPENAI_BASE_URL),
+        model: initOpts.model ?? opts.model ?? parseNonEmptyString(process.env.OPENAI_MODEL),
+        ...opts,
+      };
+      // Apply init-specific values on top (they take precedence)
+      if (initOpts.apiKey) initOverrides.apiKey = initOpts.apiKey;
+      if (initOpts.baseUrl) initOverrides.baseUrl = initOpts.baseUrl;
+      if (initOpts.model) initOverrides.model = initOpts.model;
+
+      const { config, configPath } = resolveConfig(initOverrides);
+      saveConfigFile(configPath, config);
+
+      const output = {
+        status: 'ok',
+        configPath,
+        message: `Config written to ${configPath}`,
+        apiKey: maskApiKey(config.apiKey),
+        baseUrl: config.baseUrl,
+        model: config.model ?? '',
+      };
+      if (opts.json) {
+        console.log(JSON.stringify({ status: 'ok', data: output, error: null, metadata: {} }, null, 2));
+      } else {
+        console.log(`Config written to ${configPath}`);
+        console.log(`  apiKey: ${maskApiKey(config.apiKey)}`);
+        console.log(`  baseUrl: ${config.baseUrl}`);
+        console.log(`  model: ${config.model ?? '(not set)'}`);
+      }
+      process.exit(EXIT_SUCCESS);
+    }
+
     const { config, configFileExists, configFileKeys } = resolveConfig(opts);
 
     const configInfo = {
@@ -210,12 +249,19 @@ async function runConfig(opts: CliOverrides & { json?: boolean; raw?: boolean })
       configFileKeys,
     };
 
+    const incomplete = !config.apiKey || config.apiKey === 'key' || !config.model;
+
     if (opts.json) {
-      console.log(JSON.stringify({ status: 'ok', data: configInfo, error: null, metadata: {} }, null, 2));
+      const result: Record<string, unknown> = { status: 'ok', data: configInfo, error: null, metadata: {} };
+      if (incomplete) result.hint = 'Run `image-mcp config --init` to configure';
+      console.log(JSON.stringify(result, null, 2));
     } else if (opts.raw) {
       console.log(JSON.stringify(configInfo));
     } else {
       console.log(JSON.stringify(configInfo, null, 2));
+      if (incomplete) {
+        console.error('\nConfiguration incomplete. Run `image-mcp config --init` to set up.');
+      }
     }
     process.exit(EXIT_SUCCESS);
   } catch (error) {
