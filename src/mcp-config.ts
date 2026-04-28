@@ -1,6 +1,8 @@
 import { Command } from 'commander';
 import { resolveConfig, saveConfigFile, maskApiKey, type CliOverrides, type Config, type ReasoningEffort } from './config.js';
 
+const pkgVersion = '1.1.0-beta.0';
+
 export class ConfigManager {
   private config: Config;
   private configPath: string;
@@ -13,7 +15,7 @@ export class ConfigManager {
     program
       .name('@karlcc/image_mcp')
       .description('MCP server for image summarization')
-      .version('1.0.3');
+      .version(pkgVersion);
 
     program
       .option('-k, --api-key <key>', 'OpenAI API key')

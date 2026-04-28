@@ -8,6 +8,8 @@ import { resolveConfig, maskApiKey, type CliOverrides, type Config } from './con
 import { OpenAIClient } from './openai-client.js';
 import { readImage, compareImages, type HandlerContext } from './handlers.js';
 
+const pkgVersion = '1.1.0-beta.0';
+
 // --- Output formatting ---
 
 function formatJsonResult(status: 'ok' | 'error', data: string | null, error: { code: string; message: string } | null, metadata: Record<string, unknown>): string {
@@ -50,7 +52,7 @@ const program = new Command();
 program
   .name('image-mcp')
   .description('CLI for image analysis via vision backend')
-  .version('1.1.0')
+  .version(pkgVersion)
   .helpOption('-h, --help', 'display help for command');
 
 // Global config flags (shared by subcommands)
