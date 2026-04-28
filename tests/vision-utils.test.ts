@@ -1,4 +1,4 @@
-import { extractMessageText } from '../src/index';
+import { extractMessageText } from '../src/handlers';
 import { stripGrokAssetUrls, assertVisionResponse, buildVisionGuardPrompt } from '../src/vision-response';
 
 describe('extractMessageText', () => {

@@ -28,7 +28,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_BASE_URL: 'https://env.example.com/v1',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getBaseUrl()).toBe('https://env.example.com/v1');
@@ -42,7 +42,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_BASE_URL: 'https://env.example.com/v1',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getBaseUrl()).toBe('https://cli.example.com/v1');
@@ -67,7 +67,7 @@ describe('ConfigManager configuration precedence', () => {
       MCP_PORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getApiKey()).toBe('file-key');
@@ -96,7 +96,7 @@ describe('ConfigManager configuration precedence', () => {
       MCP_PORT: '8181',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getApiKey()).toBe('env-key');
@@ -132,7 +132,7 @@ describe('ConfigManager configuration precedence', () => {
       MCP_PORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
     const persisted = await fs.readJson(configPath);
 
@@ -175,7 +175,7 @@ describe('ConfigManager configuration precedence', () => {
       MCP_PORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     new ConfigManager();
 
     const stat = await fs.stat(configPath);
@@ -191,7 +191,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_REASONING_EFFORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getReasoningEffort()).toBe('high');
@@ -205,7 +205,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_REASONING_EFFORT: 'medium',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getReasoningEffort()).toBe('medium');
@@ -219,7 +219,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_REASONING_EFFORT: 'high',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getReasoningEffort()).toBe('low');
@@ -233,7 +233,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_REASONING_EFFORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     const manager = new ConfigManager();
 
     expect(manager.getReasoningEffort()).toBeUndefined();
@@ -252,7 +252,7 @@ describe('ConfigManager configuration precedence', () => {
       OPENAI_REASONING_EFFORT: '',
     };
 
-    const { ConfigManager } = await import('../src/config');
+    const { ConfigManager } = await import('../src/mcp-config');
     new ConfigManager();
 
     const persisted = await fs.readJson(configPath);

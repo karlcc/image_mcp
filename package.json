@@ -1,6 +1,6 @@
 {
   "name": "@karlcc/image_mcp",
-  "version": "1.0.3",
+  "version": "1.1.0-beta.0",
   "description": "MCP server for image summarization using OpenAI-compatible chat completion endpoints",
   "main": "build/index.js",
   "type": "module",
@@ -9,7 +9,7 @@
     "url": "git+https://github.com/karlcc/image_mcp.git"
   },
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "tsc && node -e \"const fs=require('fs'); fs.chmodSync('build/index.js','755'); fs.chmodSync('build/cli.js','755');\"",
     "dev": "tsx watch src/index.ts",
     "start": "node build/index.js",
     "benchmark:models": "node scripts/benchmark-models.mjs",
@@ -23,20 +23,29 @@
     "type-check": "tsc --noEmit"
   },
   "bin": {
-    "image_mcp": "build/index.js"
+    "image_mcp": "build/index.js",
+    "image-mcp": "build/cli.js"
   },
+  "files": [
+    "build/",
+    "skills/",
+    ".claude-plugin/"
+  ],
   "publishConfig": {
     "access": "public"
   },
   "keywords": [
     "mcp",
-    "server",
+    "cli",
     "image",
-    "summarization",
+    "vision",
+    "ocr",
+    "screenshot",
+    "skill",
+    "agent",
     "openai",
     "chat",
-    "completion",
-    "vision"
+    "completion"
   ],
   "author": "karlcc",
   "license": "MIT",
