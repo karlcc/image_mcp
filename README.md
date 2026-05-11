@@ -102,13 +102,10 @@ npx -y @karlcc/image_mcp \
 Save your resolved configuration once and reuse it across sessions:
 
 ```bash
-node build/index.js \
+image-mcp config --init \
   --api-key your-api-key \
   --base-url https://api.openai.com/v1 \
-  --model gpt-4.1-mini \
-  --http \
-  --mcp-port 8080 \
-  --save-config
+  --model gpt-4.1-mini
 ```
 
 This writes `~/.config/image_mcp/config.json` (or a custom file via `--config /path/to/config.json`).
@@ -118,17 +115,14 @@ This writes `~/.config/image_mcp/config.json` (or a custom file via `--config /p
 Before committing to a model, verify it can actually see images:
 
 ```bash
-# Automatic: --save-config verifies vision by default before writing
-node build/index.js --model your-model --save-config
-
 # Quick one-shot check:
-IMAGE_MCP_SMOKE=1 npm run test:smoke
+image-mcp read --smoke-test
 
-# Opt-in startup probe (warns in stderr if model can't see):
-IMAGE_MCP_PROBE_ON_START=true node build/index.js
+# Or via npm script (requires IMAGE_MCP_SMOKE=1):
+IMAGE_MCP_SMOKE=1 npm run test:smoke
 ```
 
-If verification fails, the config file is **not** written and the exit code is non-zero. Use `--no-verify` to skip the check.
+If verification fails, choose a different model or check your API credentials.
 
 ## Usage
 
@@ -255,10 +249,15 @@ npm run build
 
 4. Starting the Server
 ```bash
-node build/index.js
+image-mcp config    # verify config
+image-mcp read --smoke-test   # verify API connectivity
 ```
 
-The server will start and listen on stdio for MCP protocol communications.
+The CLI reads images directly. For MCP server mode (stdio):
+
+```bash
+node build/index.js
+```
 
 To run with HTTP/SSE transport:
 ```bash
@@ -372,32 +371,29 @@ export OPENAI_BASE_URL=https://your-service-endpoint/v1
 export OPENAI_MODEL=your-vision-model
 ```
 
-2. Start the MCP server:
+2. Test with CLI:
+```bash
+image-mcp read /path/to/image.png
+```
+
+3. Or start MCP server mode for client testing:
 ```bash
 node build/index.js --http --mcp-port 8080
 ```
 
-3. Send test requests using an MCP client or test the tools directly.
+### CLI Testing
 
-### Manual Testing
-
-You can manually test the MCP server using tools like `curl` or MCP clients:
+Test the CLI directly without an MCP server:
 
 ```bash
-# Test with a local image file
-curl -X POST http://localhost:8080/sse \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "read_image_via_vision_backend",
-      "arguments": {
-        "image_path": "/path/to/your/test/image.jpg"
-      }
-    }
-  }'
+# Read an image
+image-mcp read /path/to/image.png
+
+# Compare images
+image-mcp compare before.png after.png
+
+# JSON output
+image-mcp read /path/to/image.png --json | jq .data
 ```
 
 ## API Reference
@@ -456,10 +452,15 @@ The server includes comprehensive error handling for:
 
 ```
 src/
-├── config.ts          # Configuration management
-├── image-processor.ts # Image processing utilities
-├── index.ts          # Main MCP server
-└── openai-client.ts  # OpenAI-compatible API client
+├── config.ts          # Pure config resolution (resolveConfig, saveConfigFile, CLI overrides)
+├── mcp-config.ts      # ConfigManager singleton for MCP server entry point
+├── cli.ts             # CLI entry point (read, compare, config, install-skill)
+├── index.ts           # MCP server entry point (stdio + HTTP/SSE transport)
+├── handlers.ts        # Shared business logic (readImage, compareImages, HandlerContext DI)
+├── image-processor.ts # Image normalization, MIME detection, base64 conversion
+├── openai-client.ts   # OpenAI-compatible API client with retry/backoff
+├── vision-response.ts # Vision guard — anti-hallucination prompt + response validation
+└── vision-probe.ts    # Runtime probe for vision model capability
 ```
 
 ### Building
@@ -525,15 +526,14 @@ Fallback manual publish (if trusted publishing is not configured):
 npm publish --access public --otp <6-digit-otp>
 ```
 
-### Dev cycle: four layers of vision detection
+### Dev cycle: three layers of vision detection
 
 The repo is designed so a non-vision model can't slip through silently:
 
 | Layer | When | How |
 |---|---|---|
-| Config save | `--save-config` | Probes model with a tiny fixture before writing config |
-| Smoke test | `npm run test:smoke` | Jest test against the configured model |
-| Startup probe | `IMAGE_MCP_PROBE_ON_START=true` | Warns on stderr if model fails |
+| Smoke test | `image-mcp read --smoke-test` | Sends tiny fixture image to verify vision |
+| Jest smoke | `npm run test:smoke` | Jest test against the configured model |
 | Benchmark | `npm run benchmark:models` | `--fail-if-any-nonvision` exits non-zero for 0% scorers |
 
 ## License

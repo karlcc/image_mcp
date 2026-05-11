@@ -17,6 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `image-mcp read <path>` — CLI: analyze one image
 - `image-mcp compare <p1> <p2>` — CLI: compare two images
 - `image-mcp config` — CLI: show current config
+- `image-mcp config --init --api-key <k> --base-url <u> --model <m>` — CLI: write persistent config
+- `image-mcp read --smoke-test` — CLI: verify vision backend connectivity
 - `image-mcp install-skill` — CLI: install SKILL.md to ~/.claude/skills/
 
 ## Architecture
@@ -60,7 +62,12 @@ Hybrid MCP server + CLI tool that proxies image files to an OpenAI-compatible vi
 - **4 CLI subcommands**: `read`, `compare`, `config`, `install-skill`. CLI binary is `image-mcp` (distinct from MCP binary `image_mcp`).
 - **Server instructions field** — the `Server` constructor includes `instructions` describing the vision-capable backend.
 - **Vision guard** — all image prompts pass through `buildVisionGuardPrompt()` and responses through `assertVisionResponse()` to prevent hallucinated non-vision text.
-- **SKILL.md** — agent skill definition at project root. Installed via `image-mcp install-skill` to `~/.claude/skills/image-mcp/`.
+- **SKILL.md** — agent skill definition at `skills/image_mcp/SKILL.md`. Installed via `image-mcp install-skill` to `~/.claude/skills/image_mcp/`.
+- **Version sync** — three places must match when bumping: `package.json` version, `.claude-plugin/plugin.json` version, `cli.ts` `pkgVersion` constant (line 11).
+- **Plugin structure** — "Skill-Focused Plugin" pattern: `.claude-plugin/plugin.json` + `skills/image_mcp/SKILL.md`. No `commands/` or `agents/` dirs needed. Shipped via `files` field in package.json (`build/`, `skills/`, `.claude-plugin/`).
+- **SKILL.md frontmatter** — `name` and `description` are required. `argument-hint` is a valid Claude Code extension but has no functional effect for tool-matched skills (only useful with `allowed-tools` slash commands). Omit it unless the skill becomes a slash command.
+- **Vision detection layers** — three built-in: `image-mcp read --smoke-test` (tiny fixture), `npm run test:smoke` (Jest, requires `IMAGE_MCP_SMOKE=1`), `npm run benchmark:models` (accuracy + latency).
+- **npm publish** — uses OIDC trusted publishing (no `NODE_AUTH_TOKEN` secret). One-time setup: `npx -y npm@latest trust github @karlcc/image_mcp --repo karlcc/image_mcp --file publish.yml --yes`. CI triggers on `v*` tags via `.github/workflows/publish.yml`.
 
 ## Testing
 

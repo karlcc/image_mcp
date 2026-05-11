@@ -1,7 +1,6 @@
 ---
 name: image_mcp
 description: Use when analyzing images, screenshots, diagrams, charts, or UI layouts. OCR text extraction, visual comparison, UI diff detection, chart data extraction.
-argument-hint: "<command> [args]"
 ---
 
 # image-mcp
@@ -108,7 +107,3 @@ Verify end-to-end connectivity:
 image-mcp read --smoke-test
 # Expected: exit 0, "Vision backend connected successfully"
 ```
-
-## Fallback
-
-If `image-mcp` is not installed: `npx @karlcc/image_mcp --version`
